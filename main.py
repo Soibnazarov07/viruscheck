@@ -1,5 +1,6 @@
 import os
 import re
+import io
 import asyncio
 import logging
 import sqlite3
@@ -14,8 +15,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.client.default import DefaultBotProperties
 
 # ==================== SOZLAMALAR ====================
-BOT_TOKEN = "8834267025:AAG4d5dHeh_4qFmZu9oMkrUI1_gkYo65Zb8"  # @BotFather'dan olingan Bot Token
-VIRUSTOTAL_API_KEY = "acd9961919a3ce19fccee1e1890342268aa9d9485e471a43023bea68ab400651"
+# Muhit o'zgaruvchilaridan olish (Railway uchun) yoki standart qiymat ishlatish
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8834267025:AAG4d5dHeh_4qFmZu9oMkrUI1_gkYo65Zb8")
+VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY", "acd9961919a3ce19fccee1e1890342268aa9d9485e471a43023bea68ab400651")
 ADMIN_IDS = [123456789]  # Admin(lar)ning Telegram ID raqamlari (butun son ko'rinishida)
 
 logging.basicConfig(level=logging.INFO)
@@ -107,7 +109,6 @@ class VirusTotalChecker:
         self.base_url = "https://www.virustotal.com/api/v3"
 
     async def check_hash(self, file_hash: str) -> Tuple[bool, int, int]:
-        # Keshni tekshirish
         cached = db.get_cached_result(file_hash)
         if cached:
             return bool(cached[0]), cached[1], cached[2]
@@ -126,7 +127,7 @@ class VirusTotalChecker:
                 elif resp.status == 404:
                     return False, 0, 0
                 else:
-                    logging.error(f"VirusTotal Hash Error: {resp.status}")
+                    logging.error(f"VirusTotal Hash Error Status: {resp.status}")
                     return False, 0, 0
 
     async def check_url(self, target_url: str) -> Tuple[bool, int, int]:
@@ -147,7 +148,6 @@ class VirusTotalChecker:
                     db.save_cache(url_id, is_danger, malicious, total)
                     return is_danger, malicious, total
                 elif resp.status == 404:
-                    # Link bazada bo'lmasa, uni tahlilga yuborish
                     scan_url = f"{self.base_url}/urls"
                     async with session.post(scan_url, headers=self.headers, data={'url': target_url}) as post_resp:
                         if post_resp.status == 200:
@@ -160,7 +160,6 @@ vt = VirusTotalChecker(VIRUSTOTAL_API_KEY)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Regex: Matn ichidan barcha URLlarni ajratib olish
 URL_REGEX = r'https?://[^\s]+'
 
 # ==================== HANDLERLAR ====================
@@ -175,10 +174,11 @@ async def cmd_start(message: Message):
             "<b>Imkoniyatlarim:</b>\n"
             "• Shubhali `.apk`, `.exe`, zip fayl yoki hujjatlarni yuboring — ularni skanerlayman.\n"
             "• Shubhali havolalarni (link) yuboring — xavfsizligini tekshiraman.\n"
-            "• Beni <b>guruhlaringizga admin</b> qilib qo'shing — virusli fayl va linklarni avtomatik o'chirib beraman!"
+            "• Meni <b>guruhlaringizga admin</b> qilib qo'shing — virusli fayl va linklarni avtomatik o'chirib beraman!"
         )
+        me = await bot.get_me()
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Guruhga qo'shish", url=f"https://t.me/{(await bot.get_me()).username}?startgroup=true")]
+            [InlineKeyboardButton(text="➕ Guruhga qo'shish", url=f"https://t.me/{me.username}?startgroup=true")]
         ])
         await message.answer(text, reply_markup=kb)
     else:
@@ -240,12 +240,20 @@ async def cmd_send_broadcast(message: Message):
 async def handle_document(message: Message):
     db.increment_stat("scanned_items")
     doc = message.document
-    
-    # Katta fayllarni Telegram bot orqali to'liq yuklash o'rniga ularning xususiyatidan hash yaratamiz
-    # SHA-256 hash yaratish
-    file_unique_str = f"{doc.file_name}_{doc.file_size}"
-    file_hash = hashlib.sha256(file_unique_str.encode()).hexdigest()
 
+    # 1. Faylni xotiraga (BytesIO) yuklab olish
+    file_bytes = io.BytesIO()
+    try:
+        await bot.download(doc, destination=file_bytes)
+        file_bytes.seek(0)
+    except Exception as e:
+        logging.error(f"Faylni yuklab olishda xatolik: {e}")
+        return
+
+    # 2. Faylning HAQIQIY SHA-256 hashini hisoblash
+    file_hash = hashlib.sha256(file_bytes.read()).hexdigest()
+
+    # 3. VirusTotal orqali tekshirish
     is_danger, pos, total = await vt.check_hash(file_hash)
 
     if is_danger:
@@ -307,6 +315,8 @@ async def handle_text(message: Message):
 # ==================== MAIN ====================
 async def main():
     print("🤖 CyberGuard Boti ishga tushdi...")
+    # Eski ulangan webhook/sessiyalarni tozalash
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
